@@ -65,6 +65,32 @@ class build_transformer(nn.Module):
 
         self.image_encoder = clip_model.visual
 
+        # DICMA overlapping patches parameters
+        self.dicma_use_overlapping_patches = cfg.DICMA.USE_OVERLAPPING_PATCHES
+        self.dicma_num_patches = cfg.DICMA.NUM_PATCHES
+        self.dicma_patch_size = cfg.DICMA.PATCH_SIZE
+        self.dicma_patch_stride = cfg.DICMA.PATCH_STRIDE
+
+    def _extract_overlapping_patches(self, patch_tokens, H, W):
+        """Extract patches from patch tokens.
+
+        For simplicity, sample random patch tokens to simulate overlapping patches.
+        In a full implementation, this would extract overlapping patches from the image.
+
+        Args:
+            patch_tokens: (B, H*W, embed_dim) patch tokens without CLS
+            H, W: spatial dimensions
+
+        Returns:
+            (B, num_patches, embed_dim) selected patch features
+        """
+        B, seq_len, embed_dim = patch_tokens.shape
+        # For now, randomly sample patch tokens
+        # In a real implementation, you would extract overlapping patches spatially
+        indices = torch.randperm(seq_len)[:self.dicma_num_patches]
+        selected_patches = patch_tokens[:, indices, :]  # (B, num_patches, embed_dim)
+        return selected_patches
+
         if cfg.MODEL.SIE_CAMERA and cfg.MODEL.SIE_VIEW:
             self.cv_embed = nn.Parameter(torch.zeros(camera_num * view_num, self.in_planes))
             trunc_normal_(self.cv_embed, std=.02)
@@ -99,13 +125,26 @@ class build_transformer(nn.Module):
             img_feature = image_features[:,0]
             img_feature_proj = image_features_proj[:,0]
 
+            # Extract patch features for DICMA if needed
+            patch_features = None
+            if self.dicma_use_overlapping_patches:
+                # image_features: (B, num_patches + 1, embed_dim), exclude CLS token
+                patch_tokens = image_features[:, 1:, :]  # (B, H*W, embed_dim)
+                H = self.h_resolution
+                W = self.w_resolution
+                patch_features = self._extract_overlapping_patches(patch_tokens, H, W)
+
         feat = self.bottleneck(img_feature) 
         feat_proj = self.bottleneck_proj(img_feature_proj) 
 
         if self.training:
             cls_score = self.classifier(feat)
             cls_score_proj = self.classifier_proj(feat_proj)
-            return [cls_score, cls_score_proj], [img_feature_last, img_feature, img_feature_proj]
+            # Build feature list, only include patch_features if not None
+            feat_list = [img_feature_last, img_feature, img_feature_proj]
+            if patch_features is not None:
+                feat_list.append(patch_features)
+            return [cls_score, cls_score_proj], feat_list
 
         else:
             if self.neck_feat == 'after':
